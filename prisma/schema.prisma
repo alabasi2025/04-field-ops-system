@@ -1,0 +1,665 @@
+// نظام العمليات الميدانية - Field Operations System
+// البادئة: field_
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// 1. المحرك الأساسي - Core Engine
+// ==========================================
+
+/// أنواع العمليات الميدانية
+enum FieldOperationType {
+  installation    // تركيب
+  maintenance     // صيانة
+  inspection      // فحص
+  disconnection   // فصل
+  reconnection    // إعادة توصيل
+  meter_reading   // قراءة عداد
+  collection      // تحصيل
+  migration       // ترحيل
+  replacement     // استبدال
+}
+
+/// حالات العملية
+enum FieldOperationStatus {
+  draft                   // مسودة
+  scheduled               // مجدولة
+  assigned                // معينة
+  in_progress             // قيد التنفيذ
+  completed               // مكتملة
+  cancelled               // ملغاة
+  on_hold                 // معلقة
+  rejected                // مرفوضة
+  waiting_customer_cable  // بانتظار السلك من العميل
+  pending_inspection      // بانتظار الفحص
+  approved                // معتمدة
+}
+
+/// العمليات الميدانية الرئيسية
+model field_operations {
+  id                String                 @id @default(uuid()) @db.Uuid
+  operation_number  String                 @unique @db.VarChar(30)
+  operation_type    FieldOperationType
+  status            FieldOperationStatus   @default(draft)
+  priority          Int                    @default(2) // 1=عاجل, 2=عادي, 3=منخفض
+  
+  // المرجع
+  customer_id       String?                @db.Uuid
+  meter_id          String?                @db.Uuid
+  asset_id          String?                @db.Uuid
+  station_id        String?                @db.Uuid
+  
+  // الوصف والملاحظات
+  title             String                 @db.VarChar(200)
+  description       String?                @db.Text
+  notes             String?                @db.Text
+  
+  // الموقع
+  address           String?                @db.VarChar(500)
+  latitude          Decimal?               @db.Decimal(10, 8)
+  longitude         Decimal?               @db.Decimal(11, 8)
+  
+  // التعيين
+  assigned_team_id  String?                @db.Uuid
+  assigned_worker_id String?               @db.Uuid
+  
+  // التواريخ
+  scheduled_date    DateTime?              @db.Date
+  scheduled_time    DateTime?              @db.Time(6)
+  started_at        DateTime?
+  completed_at      DateTime?
+  
+  // التكلفة
+  estimated_cost    Decimal?               @db.Decimal(12, 2)
+  actual_cost       Decimal?               @db.Decimal(12, 2)
+  
+  // التدقيق
+  created_by        String?                @db.Uuid
+  updated_by        String?                @db.Uuid
+  created_at        DateTime               @default(now())
+  updated_at        DateTime               @updatedAt
+  deleted_at        DateTime?
+  
+  // العلاقات
+  status_logs       field_operation_status_log[]
+  installation      field_installation_details?
+  photos            field_installation_photos[]
+  materials         field_operation_materials[]
+  services          field_operation_services[]
+  inspections       field_inspections[]
+  team              field_teams?           @relation(fields: [assigned_team_id], references: [id])
+  worker            field_workers?         @relation(fields: [assigned_worker_id], references: [id])
+  
+  @@index([operation_type])
+  @@index([status])
+  @@index([scheduled_date])
+  @@index([customer_id])
+  @@index([assigned_team_id])
+}
+
+/// سجل حالات العملية
+model field_operation_status_log {
+  id              String               @id @default(uuid()) @db.Uuid
+  operation_id    String               @db.Uuid
+  old_status      FieldOperationStatus?
+  new_status      FieldOperationStatus
+  changed_by      String?              @db.Uuid
+  change_reason   String?              @db.Text
+  created_at      DateTime             @default(now())
+  
+  operation       field_operations     @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+  
+  @@index([operation_id])
+}
+
+/// بيانات التركيب الفنية
+model field_installation_details {
+  id                    String           @id @default(uuid()) @db.Uuid
+  operation_id          String           @unique @db.Uuid
+  
+  // بيانات العداد
+  meter_serial          String?          @db.VarChar(50)
+  meter_type            String?          @db.VarChar(50)
+  initial_reading       Decimal?         @db.Decimal(12, 2)
+  
+  // بيانات التركيب
+  seal_number           String?          @db.VarChar(50)
+  box_number            String?          @db.VarChar(50)
+  wire_length           Decimal?         @db.Decimal(6, 2)
+  
+  // الموقع الفعلي
+  gps_latitude          Decimal?         @db.Decimal(10, 8)
+  gps_longitude         Decimal?         @db.Decimal(11, 8)
+  
+  // التوقيعات
+  customer_signature    String?          @db.Text
+  technician_signature  String?          @db.Text
+  
+  created_at            DateTime         @default(now())
+  updated_at            DateTime         @updatedAt
+  
+  operation             field_operations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+}
+
+/// صور التركيب
+model field_installation_photos {
+  id              String           @id @default(uuid()) @db.Uuid
+  operation_id    String           @db.Uuid
+  photo_type      String           @db.VarChar(30) // before, after, meter, seal, signature
+  file_path       String           @db.VarChar(500)
+  caption         String?          @db.VarChar(200)
+  uploaded_by     String?          @db.Uuid
+  uploaded_at     DateTime         @default(now())
+  
+  operation       field_operations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+  
+  @@index([operation_id])
+}
+
+// ==========================================
+// 2. إدارة الفرق والعاملين
+// ==========================================
+
+/// الفرق الميدانية
+model field_teams {
+  id              String           @id @default(uuid()) @db.Uuid
+  team_code       String           @unique @db.VarChar(20)
+  team_name       String           @db.VarChar(100)
+  team_type       String           @db.VarChar(30) // installation, maintenance, reading
+  station_id      String?          @db.Uuid
+  supervisor_id   String?          @db.Uuid
+  is_active       Boolean          @default(true)
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  members         field_team_members[]
+  operations      field_operations[]
+  work_packages   field_work_packages[]
+}
+
+/// أعضاء الفريق
+model field_team_members {
+  id              String           @id @default(uuid()) @db.Uuid
+  team_id         String           @db.Uuid
+  worker_id       String           @db.Uuid
+  role            String           @db.VarChar(30) // leader, member
+  joined_at       DateTime         @default(now())
+  left_at         DateTime?
+  is_active       Boolean          @default(true)
+  
+  team            field_teams      @relation(fields: [team_id], references: [id], onDelete: Cascade)
+  worker          field_workers    @relation(fields: [worker_id], references: [id])
+  
+  @@unique([team_id, worker_id])
+}
+
+/// العاملين الميدانيين
+model field_workers {
+  id                  String           @id @default(uuid()) @db.Uuid
+  employee_id         String?          @db.Uuid // ربط بنظام HR
+  user_id             String?          @db.Uuid // ربط بالنظام الأم
+  
+  worker_code         String           @unique @db.VarChar(20)
+  full_name           String           @db.VarChar(100)
+  phone               String?          @db.VarChar(20)
+  email               String?          @db.VarChar(100)
+  
+  worker_type         String           @db.VarChar(30) // technician, reader, collector
+  specialization      String?          @db.VarChar(50)
+  
+  is_available        Boolean          @default(true)
+  is_active           Boolean          @default(true)
+  
+  // آخر موقع معروف
+  last_latitude       Decimal?         @db.Decimal(10, 8)
+  last_longitude      Decimal?         @db.Decimal(11, 8)
+  last_location_at    DateTime?
+  
+  created_at          DateTime         @default(now())
+  updated_at          DateTime         @updatedAt
+  
+  team_memberships    field_team_members[]
+  operations          field_operations[]
+  location_logs       field_worker_location_log[]
+  performance         field_worker_performance[]
+}
+
+/// سجل مواقع العاملين
+model field_worker_location_log {
+  id              String           @id @default(uuid()) @db.Uuid
+  worker_id       String           @db.Uuid
+  latitude        Decimal          @db.Decimal(10, 8)
+  longitude       Decimal          @db.Decimal(11, 8)
+  accuracy        Decimal?         @db.Decimal(6, 2)
+  speed           Decimal?         @db.Decimal(6, 2)
+  battery_level   Int?
+  recorded_at     DateTime         @default(now())
+  
+  worker          field_workers    @relation(fields: [worker_id], references: [id], onDelete: Cascade)
+  
+  @@index([worker_id, recorded_at])
+}
+
+/// تقييم أداء العاملين
+model field_worker_performance {
+  id                  String           @id @default(uuid()) @db.Uuid
+  worker_id           String           @db.Uuid
+  period_start        DateTime         @db.Date
+  period_end          DateTime         @db.Date
+  
+  total_operations    Int              @default(0)
+  completed_on_time   Int              @default(0)
+  customer_rating     Decimal?         @db.Decimal(3, 2)
+  quality_score       Decimal?         @db.Decimal(5, 2)
+  
+  created_at          DateTime         @default(now())
+  
+  worker              field_workers    @relation(fields: [worker_id], references: [id], onDelete: Cascade)
+  
+  @@index([worker_id, period_start])
+}
+
+// ==========================================
+// 3. إدارة الخطط والجداول
+// ==========================================
+
+/// الخطط الميدانية
+model field_plans {
+  id              String           @id @default(uuid()) @db.Uuid
+  plan_code       String           @unique @db.VarChar(30)
+  plan_name       String           @db.VarChar(200)
+  plan_type       String           @db.VarChar(30) // daily, weekly, monthly, special
+  
+  station_id      String?          @db.Uuid
+  start_date      DateTime         @db.Date
+  end_date        DateTime         @db.Date
+  
+  status          String           @default("draft") @db.VarChar(20) // draft, active, completed, cancelled
+  
+  created_by      String?          @db.Uuid
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  operations      field_plan_operations[]
+}
+
+/// عمليات الخطة
+model field_plan_operations {
+  id              String           @id @default(uuid()) @db.Uuid
+  plan_id         String           @db.Uuid
+  operation_id    String           @db.Uuid
+  sequence_order  Int
+  
+  plan            field_plans      @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+  
+  @@unique([plan_id, operation_id])
+}
+
+// ==========================================
+// 4. إدارة المواد والمعدات
+// ==========================================
+
+/// مواد العملية
+model field_operation_materials {
+  id              String           @id @default(uuid()) @db.Uuid
+  operation_id    String           @db.Uuid
+  item_id         String           @db.Uuid // من نظام المخزون
+  item_code       String           @db.VarChar(50)
+  item_name       String           @db.VarChar(200)
+  
+  requested_qty   Decimal          @db.Decimal(12, 3)
+  issued_qty      Decimal?         @db.Decimal(12, 3)
+  used_qty        Decimal?         @db.Decimal(12, 3)
+  returned_qty    Decimal?         @db.Decimal(12, 3)
+  
+  unit_cost       Decimal?         @db.Decimal(12, 2)
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  operation       field_operations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+  
+  @@index([operation_id])
+}
+
+/// خدمات العملية
+model field_operation_services {
+  id              String           @id @default(uuid()) @db.Uuid
+  operation_id    String           @db.Uuid
+  service_id      String?          @db.Uuid // من كتالوج الخدمات
+  service_name    String           @db.VarChar(200)
+  
+  quantity        Decimal          @default(1) @db.Decimal(10, 2)
+  unit_cost       Decimal          @db.Decimal(12, 2)
+  technician_fee  Decimal?         @db.Decimal(12, 2)
+  
+  executed_by     String?          @db.Uuid
+  executed_at     DateTime?
+  
+  created_at      DateTime         @default(now())
+  
+  operation       field_operations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+  
+  @@index([operation_id])
+}
+
+/// المعدات الميدانية
+model field_equipment {
+  id              String           @id @default(uuid()) @db.Uuid
+  equipment_code  String           @unique @db.VarChar(30)
+  equipment_name  String           @db.VarChar(200)
+  equipment_type  String           @db.VarChar(50)
+  
+  serial_number   String?          @db.VarChar(50)
+  model           String?          @db.VarChar(100)
+  
+  status          String           @default("available") @db.VarChar(20) // available, in_use, maintenance, retired
+  current_holder  String?          @db.Uuid
+  
+  last_maintenance DateTime?
+  next_maintenance DateTime?
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+}
+
+// ==========================================
+// 5. الفحص والقبول
+// ==========================================
+
+/// الفحوصات
+model field_inspections {
+  id              String           @id @default(uuid()) @db.Uuid
+  operation_id    String           @db.Uuid
+  inspection_type String           @db.VarChar(30) // quality, safety, completion
+  
+  inspector_id    String?          @db.Uuid
+  inspection_date DateTime?
+  
+  result          String?          @db.VarChar(20) // passed, failed, conditional
+  score           Decimal?         @db.Decimal(5, 2)
+  notes           String?          @db.Text
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  operation       field_operations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+  items           field_inspection_items[]
+  
+  @@index([operation_id])
+}
+
+/// بنود الفحص
+model field_inspection_items {
+  id              String           @id @default(uuid()) @db.Uuid
+  inspection_id   String           @db.Uuid
+  check_item      String           @db.VarChar(200)
+  is_passed       Boolean?
+  notes           String?          @db.Text
+  
+  inspection      field_inspections @relation(fields: [inspection_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// 6. حزم العمل
+// ==========================================
+
+/// حالات حزمة العمل
+enum WorkPackageStatus {
+  new
+  assigned
+  in_progress
+  completed_by_team
+  under_inspection
+  rejected
+  approved
+}
+
+/// حزم العمل
+model field_work_packages {
+  id                  String             @id @default(uuid()) @db.Uuid
+  package_number      String             @unique @db.VarChar(30)
+  package_name        String             @db.VarChar(200)
+  description         String?            @db.Text
+  
+  station_id          String?            @db.Uuid
+  assigned_team_id    String?            @db.Uuid
+  contractor_name     String?            @db.VarChar(100)
+  
+  supervisor_id       String?            @db.Uuid
+  inspector_id        String?            @db.Uuid
+  
+  expected_duration   Int?               // بالأيام
+  agreed_amount       Decimal?           @db.Decimal(12, 2)
+  calculated_amount   Decimal?           @db.Decimal(12, 2)
+  
+  status              WorkPackageStatus  @default(new)
+  
+  inspection_notes    String?            @db.Text
+  rejection_reason    String?            @db.Text
+  
+  created_at          DateTime           @default(now())
+  assigned_at         DateTime?
+  started_at          DateTime?
+  completed_at        DateTime?
+  inspected_at        DateTime?
+  approved_at         DateTime?
+  
+  created_by          String?            @db.Uuid
+  updated_at          DateTime           @updatedAt
+  
+  team                field_teams?       @relation(fields: [assigned_team_id], references: [id])
+  items               field_work_package_items[]
+  photos              field_package_photos[]
+}
+
+/// مهام حزمة العمل
+model field_work_package_items {
+  id              String               @id @default(uuid()) @db.Uuid
+  package_id      String               @db.Uuid
+  operation_id    String               @db.Uuid
+  sequence_order  Int
+  item_status     String               @default("pending") @db.VarChar(20)
+  completed_at    DateTime?
+  notes           String?              @db.Text
+  
+  package         field_work_packages  @relation(fields: [package_id], references: [id], onDelete: Cascade)
+  
+  @@index([package_id])
+}
+
+/// صور حزمة العمل
+model field_package_photos {
+  id              String               @id @default(uuid()) @db.Uuid
+  package_id      String               @db.Uuid
+  photo_type      String               @db.VarChar(20) // team_upload, inspector_upload
+  file_path       String               @db.VarChar(500)
+  caption         String?              @db.Text
+  is_issue        Boolean              @default(false)
+  uploaded_by     String?              @db.Uuid
+  uploaded_at     DateTime             @default(now())
+  
+  package         field_work_packages  @relation(fields: [package_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// 7. الدفع والتسوية
+// ==========================================
+
+/// أوامر الدفع
+model field_payment_orders {
+  id                  String           @id @default(uuid()) @db.Uuid
+  payment_number      String           @unique @db.VarChar(30)
+  
+  source_type         String           @db.VarChar(30) // work_package, operation
+  source_id           String           @db.Uuid
+  
+  beneficiary_type    String           @db.VarChar(20) // team, contractor, worker
+  beneficiary_id      String?          @db.Uuid
+  beneficiary_name    String           @db.VarChar(100)
+  
+  amount              Decimal          @db.Decimal(12, 2)
+  currency            String           @default("YER") @db.VarChar(3)
+  
+  status              String           @default("pending") @db.VarChar(20) // pending, approved, paid, cancelled
+  
+  approved_by         String?          @db.Uuid
+  approved_at         DateTime?
+  paid_at             DateTime?
+  payment_reference   String?          @db.VarChar(100)
+  
+  notes               String?          @db.Text
+  
+  created_by          String?          @db.Uuid
+  created_at          DateTime         @default(now())
+  updated_at          DateTime         @updatedAt
+}
+
+// ==========================================
+// 8. جولات القراءة
+// ==========================================
+
+/// قوالب جولات القراءة
+model field_reading_templates {
+  id              String           @id @default(uuid()) @db.Uuid
+  template_code   String           @unique @db.VarChar(30)
+  template_name   String           @db.VarChar(200)
+  
+  station_id      String?          @db.Uuid
+  area_id         String?          @db.Uuid
+  
+  frequency       String           @db.VarChar(20) // daily, weekly, monthly
+  estimated_time  Int?             // بالدقائق
+  
+  is_active       Boolean          @default(true)
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  items           field_reading_template_items[]
+  rounds          field_reading_rounds[]
+}
+
+/// عناصر قالب الجولة
+model field_reading_template_items {
+  id              String                   @id @default(uuid()) @db.Uuid
+  template_id     String                   @db.Uuid
+  meter_id        String                   @db.Uuid
+  sequence_order  Int
+  
+  template        field_reading_templates  @relation(fields: [template_id], references: [id], onDelete: Cascade)
+  
+  @@index([template_id])
+}
+
+/// جولات القراءة
+model field_reading_rounds {
+  id              String                   @id @default(uuid()) @db.Uuid
+  round_number    String                   @unique @db.VarChar(30)
+  template_id     String                   @db.Uuid
+  
+  scheduled_date  DateTime                 @db.Date
+  assigned_to     String?                  @db.Uuid
+  
+  status          String                   @default("scheduled") @db.VarChar(20)
+  
+  started_at      DateTime?
+  completed_at    DateTime?
+  
+  total_meters    Int                      @default(0)
+  read_meters     Int                      @default(0)
+  
+  created_at      DateTime                 @default(now())
+  updated_at      DateTime                 @updatedAt
+  
+  template        field_reading_templates  @relation(fields: [template_id], references: [id])
+  readings        field_meter_readings[]
+}
+
+/// قراءات العدادات
+model field_meter_readings {
+  id              String               @id @default(uuid()) @db.Uuid
+  round_id        String               @db.Uuid
+  meter_id        String               @db.Uuid
+  
+  reading_value   Decimal              @db.Decimal(12, 2)
+  reading_date    DateTime             @default(now())
+  
+  photo_path      String?              @db.VarChar(500)
+  latitude        Decimal?             @db.Decimal(10, 8)
+  longitude       Decimal?             @db.Decimal(11, 8)
+  
+  is_anomaly      Boolean              @default(false)
+  anomaly_reason  String?              @db.VarChar(200)
+  
+  read_by         String?              @db.Uuid
+  
+  round           field_reading_rounds @relation(fields: [round_id], references: [id], onDelete: Cascade)
+  
+  @@index([round_id])
+  @@index([meter_id])
+}
+
+// ==========================================
+// 9. منصة التواصل الداخلي
+// ==========================================
+
+/// قنوات التواصل
+model field_channels {
+  id              String           @id @default(uuid()) @db.Uuid
+  channel_name    String           @db.VarChar(100)
+  channel_type    String           @db.VarChar(20) // team, project, general
+  description     String?          @db.Text
+  
+  created_by      String?          @db.Uuid
+  is_active       Boolean          @default(true)
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  members         field_channel_members[]
+  messages        field_messages[]
+}
+
+/// أعضاء القناة
+model field_channel_members {
+  id              String           @id @default(uuid()) @db.Uuid
+  channel_id      String           @db.Uuid
+  user_id         String           @db.Uuid
+  role            String           @default("member") @db.VarChar(20)
+  joined_at       DateTime         @default(now())
+  
+  channel         field_channels   @relation(fields: [channel_id], references: [id], onDelete: Cascade)
+  
+  @@unique([channel_id, user_id])
+}
+
+/// الرسائل
+model field_messages {
+  id              String           @id @default(uuid()) @db.Uuid
+  channel_id      String           @db.Uuid
+  sender_id       String           @db.Uuid
+  
+  content         String           @db.Text
+  message_type    String           @default("text") @db.VarChar(20)
+  
+  reply_to_id     String?          @db.Uuid
+  
+  is_edited       Boolean          @default(false)
+  is_deleted      Boolean          @default(false)
+  
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+  
+  channel         field_channels   @relation(fields: [channel_id], references: [id], onDelete: Cascade)
+  
+  @@index([channel_id, created_at])
+}
